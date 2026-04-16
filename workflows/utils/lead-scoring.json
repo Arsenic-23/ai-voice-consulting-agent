@@ -1,0 +1,104 @@
+{
+  "name": "UTIL — Lead Scoring Engine",
+  "nodes": [
+    {
+      "id": "node-trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "parameters": {}
+    },
+    {
+      "id": "node-load-lead",
+      "name": "DB: Load Full Lead",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "parameters": {
+        "operation": "get",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $json.lead_id }}" }
+      }
+    },
+    {
+      "id": "node-load-call",
+      "name": "DB: Load Latest Call Log",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 150],
+      "parameters": {
+        "operation": "getMany",
+        "table": "call_logs",
+        "filterType": "string",
+        "filters": { "lead_id": "={{ $('Execute Workflow Trigger').item.json.lead_id }}" },
+        "limit": 1,
+        "options": { "sort": { "field": "created_at", "direction": "desc" } }
+      }
+    },
+    {
+      "id": "node-score",
+      "name": "Compute Full Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 75],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const lead = $('DB: Load Full Lead').item.json;\nconst callLog = $('DB: Load Latest Call Log').item.json[0] || {};\nlet score = 0;\nconst reasons = [];\n\n// Budget (0–30)\nconst b = (lead.budget || '').toLowerCase();\nif (b.includes('100k') || b.includes('100,000')) { score += 30; reasons.push('Budget 100k+'); }\nelse if (b.includes('50k') || b.includes('50,000')) { score += 22; reasons.push('Budget 50k+'); }\nelse if (b.includes('25k')) { score += 15; reasons.push('Budget 25k+'); }\nelse if (b.includes('10k')) { score += 8;  reasons.push('Budget 10k+'); }\nelse if (b.includes('5k'))  { score += 4;  reasons.push('Budget 5k+'); }\n\n// Urgency (0–25)\nconst u = (lead.urgency || '').toLowerCase();\nif (u === 'high' || u.includes('asap') || u.includes('urgent')) { score += 25; reasons.push('High urgency'); }\nelse if (u === 'medium' || u.includes('soon')) { score += 15; reasons.push('Medium urgency'); }\nelse if (u === 'low' || u.includes('quarter')) { score += 5; reasons.push('Low urgency'); }\n\n// Business Size (0–20)\nconst bz = (lead.business_size || '').toLowerCase();\nif (bz.includes('enterprise') || bz.includes('500+')) { score += 20; reasons.push('Enterprise'); }\nelse if (bz.includes('mid') || bz.includes('100') || bz.includes('50')) { score += 12; reasons.push('Mid-market'); }\nelse if (bz.includes('small') || bz.includes('startup')) { score += 6; reasons.push('SMB'); }\n\n// Engagement (0–15)\nif (callLog.sentiment === 'positive') { score += 10; reasons.push('Positive sentiment'); }\nif ((callLog.duration_sec || 0) > 180) { score += 5; reasons.push('Long call (>3min)'); }\n\n// Bonuses\nif (lead.status === 'booked')      { score += 10; reasons.push('Meeting booked'); }\nif ((lead.retry_count || 0) === 0) { score += 5;  reasons.push('Answered first call'); }\n\nconst finalScore = Math.min(score, 100);\nconst classification = finalScore >= 70 ? 'hot' : finalScore >= 40 ? 'warm' : 'cold';\n\nreturn [{ json: { lead_id: lead.id, score: finalScore, classification, score_reasons: reasons, scored_at: new Date().toISOString() } }];"
+      }
+    },
+    {
+      "id": "node-update-lead",
+      "name": "DB: Update Lead Score",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [660, 75],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $json.lead_id }}" },
+        "fields": {
+          "values": {
+            "string": [
+              { "key": "score",  "value": "={{ $json.score }}" },
+              { "key": "status", "value": "={{ $json.classification }}" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "node-log",
+      "name": "DB: Log Score Event",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, 75],
+      "parameters": {
+        "operation": "insert",
+        "table": "workflow_logs",
+        "fields": {
+          "values": {
+            "string": [
+              { "key": "workflow_name", "value": "lead-scoring" },
+              { "key": "lead_id",       "value": "={{ $('Compute Full Score').item.json.lead_id }}" },
+              { "key": "step",          "value": "scored" },
+              { "key": "output",        "value": "={{ JSON.stringify($('Compute Full Score').item.json) }}" }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": { "main": [[{ "node": "DB: Load Full Lead", "type": "main", "index": 0 }, { "node": "DB: Load Latest Call Log", "type": "main", "index": 0 }]] },
+    "DB: Load Full Lead":       { "main": [[{ "node": "Compute Full Score", "type": "main", "index": 0 }]] },
+    "DB: Load Latest Call Log": { "main": [[{ "node": "Compute Full Score", "type": "main", "index": 0 }]] },
+    "Compute Full Score":       { "main": [[{ "node": "DB: Update Lead Score", "type": "main", "index": 0 }]] },
+    "DB: Update Lead Score":    { "main": [[{ "node": "DB: Log Score Event",   "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {},
+  "tags": ["calling-agent", "utility", "scoring"]
+}

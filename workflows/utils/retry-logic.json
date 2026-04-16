@@ -1,0 +1,130 @@
+{
+  "name": "UTIL — Retry Logic",
+  "nodes": [
+    {
+      "id": "node-trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "parameters": {}
+    },
+    {
+      "id": "node-load-lead",
+      "name": "DB: Load Lead Retry State",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "parameters": {
+        "operation": "get",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $json.lead_id }}" }
+      }
+    },
+    {
+      "id": "node-calc-delay",
+      "name": "Calculate Retry Delay",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const retryCount = parseInt($json.retry_count || 0);\nconst delays = {\n  0: { hours: 1,  label: '1 hour'   },\n  1: { hours: 6,  label: '6 hours'  },\n  2: { hours: 24, label: '24 hours' }\n};\nif (retryCount >= 3) return [{ json: { should_retry: false, retry_count: retryCount, lead_id: $json.id } }];\nreturn [{ json: { should_retry: true, delay_hours: delays[retryCount].hours, delay_label: delays[retryCount].label, next_retry_num: retryCount + 1, lead_id: $json.id, phone: $json.phone } }];"
+      }
+    },
+    {
+      "id": "node-if-retry",
+      "name": "IF: Should Retry",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 0],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.should_retry }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equal" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-wait",
+      "name": "Wait: Dynamic Delay",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [880, -100],
+      "parameters": {
+        "resume": "timeInterval",
+        "unit": "hours",
+        "value": "={{ $json.delay_hours }}"
+      }
+    },
+    {
+      "id": "node-increment",
+      "name": "DB: Increment Retry Count",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1100, -100],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $json.lead_id }}" },
+        "fields": {
+          "values": {
+            "number": [{ "key": "retry_count", "value": "={{ $json.next_retry_num }}" }]
+          }
+        }
+      }
+    },
+    {
+      "id": "node-exec-outbound",
+      "name": "Execute: Outbound Calling",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1320, -100],
+      "parameters": {
+        "workflowId": "01-outbound-calling",
+        "source": "database",
+        "workflowInputs": {
+          "schema": [{ "key": "lead_id", "type": "string" }],
+          "value": { "lead_id": "={{ $json.lead_id }}" }
+        }
+      }
+    },
+    {
+      "id": "node-mark-lost",
+      "name": "DB: Mark Lead Lost",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, 100],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $json.lead_id }}" },
+        "fields": { "values": { "string": [{ "key": "status", "value": "lost" }] } }
+      }
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger":   { "main": [[{ "node": "DB: Load Lead Retry State", "type": "main", "index": 0 }]] },
+    "DB: Load Lead Retry State":  { "main": [[{ "node": "Calculate Retry Delay", "type": "main", "index": 0 }]] },
+    "Calculate Retry Delay":      { "main": [[{ "node": "IF: Should Retry", "type": "main", "index": 0 }]] },
+    "IF: Should Retry":           {
+      "main": [
+        [{ "node": "Wait: Dynamic Delay", "type": "main", "index": 0 }],
+        [{ "node": "DB: Mark Lead Lost",  "type": "main", "index": 0 }]
+      ]
+    },
+    "Wait: Dynamic Delay":        { "main": [[{ "node": "DB: Increment Retry Count", "type": "main", "index": 0 }]] },
+    "DB: Increment Retry Count":  { "main": [[{ "node": "Execute: Outbound Calling", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {},
+  "tags": ["calling-agent", "utility", "retry"]
+}
