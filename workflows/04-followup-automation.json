@@ -1,0 +1,255 @@
+{
+  "name": "04 — Follow-Up Automation",
+  "nodes": [
+    {
+      "id": "node-trigger",
+      "name": "Webhook: Follow-Up Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "trigger-followup",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "trigger-followup",
+        "responseMode": "onReceived"
+      }
+    },
+    {
+      "id": "node-load-lead",
+      "name": "DB: Load Lead",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "parameters": {
+        "operation": "get",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $json.lead_id }}" }
+      }
+    },
+    {
+      "id": "node-switch-outcome",
+      "name": "Switch: Outcome",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [440, 0],
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $('Webhook: Follow-Up Trigger').item.json.outcome }}",
+        "rules": {
+          "rules": [
+            { "value": "no-answer",      "outputKey": "no_answer"      },
+            { "value": "interested",     "outputKey": "interested"     },
+            { "value": "follow_up",      "outputKey": "follow_up"      },
+            { "value": "not_interested", "outputKey": "not_interested" }
+          ]
+        },
+        "fallbackOutput": "not_interested"
+      }
+    },
+    {
+      "id": "node-wait-2h",
+      "name": "Wait: 2 Hours (No Answer)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [660, -300],
+      "parameters": { "resume": "timeInterval", "unit": "hours", "value": 2 }
+    },
+    {
+      "id": "node-increment-retry",
+      "name": "DB: Increment Retry Count",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, -300],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $('DB: Load Lead').item.json.id }}" },
+        "fields": {
+          "values": {
+            "number": [{ "key": "retry_count", "value": "={{ ($('DB: Load Lead').item.json.retry_count || 0) + 1 }}" }]
+          }
+        }
+      }
+    },
+    {
+      "id": "node-if-retry",
+      "name": "IF: Retry Allowed",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1100, -300],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ ($('DB: Load Lead').item.json.retry_count || 0) + 1 }}",
+              "rightValue": 3,
+              "operator": { "type": "number", "operation": "lte" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-exec-outbound",
+      "name": "Execute: Outbound Calling",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1320, -400],
+      "parameters": {
+        "workflowId": "01-outbound-calling",
+        "source": "database"
+      }
+    },
+    {
+      "id": "node-mark-lost",
+      "name": "DB: Mark Lead Lost",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1320, -200],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $('DB: Load Lead').item.json.id }}" },
+        "fields": { "values": { "string": [{ "key": "status", "value": "lost" }] } }
+      }
+    },
+    {
+      "id": "node-whatsapp",
+      "name": "Twilio: Send WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [660, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "To",   "value": "=whatsapp:{{ $('DB: Load Lead').item.json.phone }}" },
+            { "name": "From", "value": "=whatsapp:{{ $env.TWILIO_PHONE_NUMBER }}" },
+            { "name": "Body", "value": "=Hi {{ $('DB: Load Lead').item.json.name }} 👋\n\nThank you for speaking with us! We're excited about helping {{ $('DB: Load Lead').item.json.company || 'your business' }}.\n\nWe'll send our proposal shortly. Reply here with any questions.\n\nBest,\nThe Consulting Team" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-email-interested",
+      "name": "Gmail: Interested Follow-Up",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [880, 0],
+      "parameters": {
+        "operation": "send",
+        "subject": "=Next Steps | {{ $('DB: Load Lead').item.json.company || $('DB: Load Lead').item.json.name }}",
+        "emailType": "html",
+        "message": "=<html><body style=\"font-family:Arial,sans-serif;max-width:600px\"><h2>Great Connecting, {{ $('DB: Load Lead').item.json.name }}!</h2><p>Based on our conversation, I believe we can significantly help {{ $('DB: Load Lead').item.json.company || 'your company' }}.</p><h3>Next Steps:</h3><ol><li>Book your free 30-min strategy call: <a href='https://calendly.com/your-link'>Schedule Here</a></li><li>Receive a customized proposal within 48 hours</li></ol><p>Looking forward to our partnership!</p><p><strong>The Consulting Team</strong></p></body></html>",
+        "toList": "={{ $('DB: Load Lead').item.json.email }}"
+      }
+    },
+    {
+      "id": "node-mark-warm",
+      "name": "DB: Mark Lead Warm",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1100, 0],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $('DB: Load Lead').item.json.id }}" },
+        "fields": { "values": { "string": [{ "key": "status", "value": "warm" }] } }
+      }
+    },
+    {
+      "id": "node-wait-24h",
+      "name": "Wait: 24 Hours (Follow-Up)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [660, 200],
+      "parameters": { "resume": "timeInterval", "unit": "hours", "value": 24 }
+    },
+    {
+      "id": "node-sms-reminder",
+      "name": "Twilio: SMS Reminder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [880, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "To",   "value": "={{ $('DB: Load Lead').item.json.phone }}" },
+            { "name": "From", "value": "={{ $env.TWILIO_PHONE_NUMBER }}" },
+            { "name": "Body", "value": "=Hi {{ $('DB: Load Lead').item.json.name }}, following up from our call yesterday. Ready to explore how we can help? Book a quick call: https://calendly.com/your-link 🚀" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-email-reminder",
+      "name": "Gmail: Follow-Up Reminder",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [1100, 200],
+      "parameters": {
+        "operation": "send",
+        "subject": "=Following Up — {{ $('DB: Load Lead').item.json.name }}",
+        "emailType": "html",
+        "message": "=<html><body style=\"font-family:Arial,sans-serif\"><p>Hi {{ $('DB: Load Lead').item.json.name }},</p><p>I wanted to follow up from our conversation. I know things get busy, so I wanted to make it easy for you.</p><p><a href='https://calendly.com/your-link' style='background:#4F46E5;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;display:inline-block;'>📅 Book Your Free Strategy Call</a></p><p>This 30-minute call is completely free — I'll share 3 specific strategies tailored to {{ $('DB: Load Lead').item.json.company || 'your business' }}.</p><p><strong>The Consulting Team</strong></p></body></html>",
+        "toList": "={{ $('DB: Load Lead').item.json.email }}"
+      }
+    },
+    {
+      "id": "node-archive",
+      "name": "DB: Archive Lead (Cold)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [660, 400],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $('DB: Load Lead').item.json.id }}" },
+        "fields": { "values": { "string": [{ "key": "status", "value": "cold" }] } }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook: Follow-Up Trigger":    { "main": [[{ "node": "DB: Load Lead", "type": "main", "index": 0 }]] },
+    "DB: Load Lead":                 { "main": [[{ "node": "Switch: Outcome", "type": "main", "index": 0 }]] },
+    "Switch: Outcome":               {
+      "main": [
+        [{ "node": "Wait: 2 Hours (No Answer)", "type": "main", "index": 0 }],
+        [{ "node": "Twilio: Send WhatsApp",     "type": "main", "index": 0 }],
+        [{ "node": "Wait: 24 Hours (Follow-Up)","type": "main", "index": 0 }],
+        [{ "node": "DB: Archive Lead (Cold)",   "type": "main", "index": 0 }]
+      ]
+    },
+    "Wait: 2 Hours (No Answer)":      { "main": [[{ "node": "DB: Increment Retry Count", "type": "main", "index": 0 }]] },
+    "DB: Increment Retry Count":      { "main": [[{ "node": "IF: Retry Allowed", "type": "main", "index": 0 }]] },
+    "IF: Retry Allowed":              {
+      "main": [
+        [{ "node": "Execute: Outbound Calling", "type": "main", "index": 0 }],
+        [{ "node": "DB: Mark Lead Lost",         "type": "main", "index": 0 }]
+      ]
+    },
+    "Twilio: Send WhatsApp":          { "main": [[{ "node": "Gmail: Interested Follow-Up", "type": "main", "index": 0 }]] },
+    "Gmail: Interested Follow-Up":    { "main": [[{ "node": "DB: Mark Lead Warm", "type": "main", "index": 0 }]] },
+    "Wait: 24 Hours (Follow-Up)":     { "main": [[{ "node": "Twilio: SMS Reminder", "type": "main", "index": 0 }]] },
+    "Twilio: SMS Reminder":           { "main": [[{ "node": "Gmail: Follow-Up Reminder", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "errorWorkflow": "util-escalation" },
+  "tags": ["calling-agent", "followup"]
+}

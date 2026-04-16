@@ -1,0 +1,279 @@
+{
+  "name": "03 — AI Conversation Processing",
+  "nodes": [
+    {
+      "id": "node-webhook-turn",
+      "name": "Webhook: Conversation Turn",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "conversation-turn",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "conversation-turn",
+        "responseMode": "lastNode"
+      }
+    },
+    {
+      "id": "node-load-call-log",
+      "name": "DB: Load Call Log",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, -80],
+      "parameters": {
+        "operation": "get",
+        "table": "call_logs",
+        "filterType": "string",
+        "filters": { "call_sid": "={{ $json.call_sid }}" }
+      }
+    },
+    {
+      "id": "node-load-lead",
+      "name": "DB: Load Lead Profile",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 80],
+      "parameters": {
+        "operation": "get",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $('Webhook: Conversation Turn').item.json.lead_id }}" }
+      }
+    },
+    {
+      "id": "node-build-context",
+      "name": "Build LLM Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const webhookData = $('Webhook: Conversation Turn').item.json;\nconst lead = $('DB: Load Lead Profile').item.json;\nconst callLog = $('DB: Load Call Log').item.json;\n\nconst existingTranscript = callLog.transcript || '[]';\nlet conversationHistory;\ntry { conversationHistory = JSON.parse(existingTranscript); } catch(e) { conversationHistory = []; }\n\nconversationHistory.push({ role: 'user', content: webhookData.transcript });\n\nconst systemPrompt = `You are Alex, an expert sales consultant for a high-end consulting firm.\nYour goal is to qualify ${lead.name || 'this lead'} and book a free 30-minute strategy call.\n\nLEAD PROFILE:\n- Name: ${lead.name || 'Unknown'}\n- Company: ${lead.company || 'Unknown'}\n- Status: ${lead.status}\n- Budget: ${lead.budget || 'not discussed'}\n- Business size: ${lead.business_size || 'not discussed'}\n- Problem: ${lead.problem || 'not discussed'}\n- Urgency: ${lead.urgency || 'unknown'}\n- Score: ${lead.score}/100\n\nCONVERSATION FLOW: Greeting → Discovery → Qualification → Value Prop → Objection Handling → Book CTA\n\nSPECIAL COMMANDS (append to your response when applicable):\n[BOOK_MEETING] - lead agrees to book\n[NOT_INTERESTED] - clearly declines after 2 attempts\n[ESCALATE] - complex enterprise/legal query\n[FOLLOW_UP] - lead asks to be called back\n\nRULES: Max 35 words per response. No filler phrases. Natural voice tone.\nNever invent pricing. If asked: starting from $2,500/month.\nCurrent turn: ${webhookData.turn_number} | Duration: ${webhookData.call_duration_so_far}s`;\n\nreturn [{\n  json: {\n    system_prompt: systemPrompt,\n    conversation_history: conversationHistory,\n    lead_id: lead.id,\n    call_sid: webhookData.call_sid\n  }\n}];"
+      }
+    },
+    {
+      "id": "node-openai",
+      "name": "OpenAI: Generate Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [660, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.OPENAI_API_KEY }}" },
+            { "name": "Content-Type",  "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"{{ $env.OPENAI_MODEL }}\",\n  \"messages\": [\n    {\"role\": \"system\", \"content\": {{ JSON.stringify($json.system_prompt) }}}\n  ].concat({{ JSON.stringify($json.conversation_history) }}),\n  \"max_tokens\": 150,\n  \"temperature\": 0.7,\n  \"presence_penalty\": 0.3,\n  \"frequency_penalty\": 0.5\n}"
+      }
+    },
+    {
+      "id": "node-parse-response",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const aiText = $json.choices[0].message.content;\nconst buildCtx = $('Build LLM Context').item.json;\n\nlet intent = 'CONTINUE';\nlet cleanText = aiText;\n\nif (aiText.includes('[BOOK_MEETING]'))    { intent = 'BOOK_MEETING';    cleanText = aiText.replace('[BOOK_MEETING]', '').trim(); }\nelse if (aiText.includes('[NOT_INTERESTED]')) { intent = 'NOT_INTERESTED'; cleanText = aiText.replace('[NOT_INTERESTED]', '').trim(); }\nelse if (aiText.includes('[ESCALATE]'))   { intent = 'ESCALATE';       cleanText = aiText.replace('[ESCALATE]', '').trim(); }\nelse if (aiText.includes('[FOLLOW_UP]'))  { intent = 'FOLLOW_UP';      cleanText = aiText.replace('[FOLLOW_UP]', '').trim(); }\n\nconst userMsg = (buildCtx.conversation_history.slice(-1)[0]?.content || '').toLowerCase();\nconst positive = ['interested','yes','great','definitely','sounds good','perfect','let\\'s do it'];\nconst negative = ['not interested','no thanks','stop','remove','don\\'t call','busy'];\nlet sentiment = 'neutral';\nif (positive.some(w => userMsg.includes(w))) sentiment = 'positive';\nif (negative.some(w => userMsg.includes(w))) sentiment = 'negative';\n\nconst updatedHistory = [...buildCtx.conversation_history, { role: 'assistant', content: cleanText }];\n\nreturn [{ json: { ai_response_text: cleanText, intent, sentiment, conversation_history: updatedHistory, lead_id: buildCtx.lead_id, call_sid: buildCtx.call_sid } }];"
+      }
+    },
+    {
+      "id": "node-switch-intent",
+      "name": "Switch: Intent Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1100, 0],
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $json.intent }}",
+        "rules": {
+          "rules": [
+            { "value": "BOOK_MEETING",    "outputKey": "book"     },
+            { "value": "ESCALATE",        "outputKey": "escalate" },
+            { "value": "NOT_INTERESTED",  "outputKey": "lost"     },
+            { "value": "FOLLOW_UP",       "outputKey": "followup" },
+            { "value": "CONTINUE",        "outputKey": "continue" }
+          ]
+        },
+        "fallbackOutput": "continue"
+      }
+    },
+    {
+      "id": "node-tts",
+      "name": "ElevenLabs: TTS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1320, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.elevenlabs.io/v1/text-to-speech/{{ $env.ELEVENLABS_VOICE_ID }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "xi-api-key",   "value": "={{ $env.ELEVENLABS_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": {{ JSON.stringify($('Parse AI Response').item.json.ai_response_text) }},\n  \"model_id\": \"eleven_monolingual_v1\",\n  \"voice_settings\": { \"stability\": 0.5, \"similarity_boost\": 0.75, \"style\": 0.3 }\n}",
+        "options": {
+          "response": { "response": { "responseFormat": "file" } }
+        }
+      }
+    },
+    {
+      "id": "node-send-audio",
+      "name": "HTTP: Return Audio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1540, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AI_SERVER_URL }}/audio-response",
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "data",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [{ "name": "call_sid", "value": "={{ $('Parse AI Response').item.json.call_sid }}" }]
+        }
+      }
+    },
+    {
+      "id": "node-save-transcript",
+      "name": "DB: Save Transcript",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1320, 0],
+      "parameters": {
+        "operation": "update",
+        "table": "call_logs",
+        "filterType": "string",
+        "filters": { "call_sid": "={{ $json.call_sid }}" },
+        "fields": {
+          "values": {
+            "string": [
+              { "key": "transcript", "value": "={{ JSON.stringify($json.conversation_history) }}" },
+              { "key": "sentiment",  "value": "={{ $json.sentiment }}" },
+              { "key": "outcome",    "value": "={{ $json.intent.toLowerCase().replace('_','-') }}" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "node-score",
+      "name": "Compute Lead Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const parseData = $('Parse AI Response').item.json;\nconst allText = parseData.conversation_history.map(h => h.content).join(' ').toLowerCase();\nlet score = 0;\nif (allText.includes('100k') || allText.includes('100,000')) score += 30;\nelse if (allText.includes('50k')) score += 22;\nelse if (allText.includes('25k')) score += 15;\nelse if (allText.includes('10k')) score += 8;\nelse if (allText.includes('5k'))  score += 4;\nif (allText.includes('asap') || allText.includes('urgent')) score += 25;\nelse if (allText.includes('this month') || allText.includes('soon')) score += 15;\nelse if (allText.includes('next quarter')) score += 5;\nif (allText.includes('enterprise') || allText.includes('corporation')) score += 20;\nelse if (allText.includes('team') || allText.includes('50 employees')) score += 10;\nif (parseData.sentiment === 'positive') score += 15;\nif (parseData.intent === 'BOOK_MEETING') score += 10;\nconst finalScore = Math.min(score, 100);\nlet status = finalScore >= 70 ? 'hot' : finalScore >= 40 ? 'warm' : 'cold';\nreturn [{ json: { lead_id: parseData.lead_id, score: finalScore, status } }];"
+      }
+    },
+    {
+      "id": "node-update-lead",
+      "name": "DB: Update Lead Score",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1760, 0],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $json.lead_id }}" },
+        "fields": {
+          "values": {
+            "string": [
+              { "key": "score",       "value": "={{ $json.score }}" },
+              { "key": "status",      "value": "={{ $json.status }}" },
+              { "key": "last_called", "value": "={{ new Date().toISOString() }}" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "node-exec-booking",
+      "name": "Execute: Booking Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1320, -200],
+      "parameters": {
+        "workflowId": "05-booking-calendar",
+        "source": "database"
+      }
+    },
+    {
+      "id": "node-exec-followup",
+      "name": "Execute: Follow-Up",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1320, -300],
+      "parameters": {
+        "workflowId": "04-followup-automation",
+        "source": "database"
+      }
+    },
+    {
+      "id": "node-exec-escalate",
+      "name": "Execute: Escalation",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1320, -400],
+      "parameters": {
+        "workflowId": "util-escalation",
+        "source": "database"
+      }
+    },
+    {
+      "id": "node-archive-lead",
+      "name": "DB: Archive Lead",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1320, -500],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $('Parse AI Response').item.json.lead_id }}" },
+        "fields": {
+          "values": {
+            "string": [{ "key": "status", "value": "cold" }]
+          }
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook: Conversation Turn": { "main": [[{ "node": "DB: Load Call Log", "type": "main", "index": 0 }, { "node": "DB: Load Lead Profile", "type": "main", "index": 0 }]] },
+    "DB: Load Call Log":          { "main": [[{ "node": "Build LLM Context", "type": "main", "index": 0 }]] },
+    "DB: Load Lead Profile":      { "main": [[{ "node": "Build LLM Context", "type": "main", "index": 0 }]] },
+    "Build LLM Context":          { "main": [[{ "node": "OpenAI: Generate Response", "type": "main", "index": 0 }]] },
+    "OpenAI: Generate Response":  { "main": [[{ "node": "Parse AI Response", "type": "main", "index": 0 }]] },
+    "Parse AI Response":          { "main": [[{ "node": "Switch: Intent Router", "type": "main", "index": 0 }]] },
+    "Switch: Intent Router":      {
+      "main": [
+        [{ "node": "Execute: Booking Workflow", "type": "main", "index": 0 }],
+        [{ "node": "Execute: Escalation",       "type": "main", "index": 0 }],
+        [{ "node": "DB: Archive Lead",          "type": "main", "index": 0 }],
+        [{ "node": "Execute: Follow-Up",        "type": "main", "index": 0 }],
+        [{ "node": "ElevenLabs: TTS",           "type": "main", "index": 0 }, { "node": "DB: Save Transcript", "type": "main", "index": 0 }]
+      ]
+    },
+    "ElevenLabs: TTS":      { "main": [[{ "node": "HTTP: Return Audio", "type": "main", "index": 0 }]] },
+    "DB: Save Transcript":  { "main": [[{ "node": "Compute Lead Score", "type": "main", "index": 0 }]] },
+    "Compute Lead Score":   { "main": [[{ "node": "DB: Update Lead Score", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "errorWorkflow": "util-escalation" },
+  "tags": ["calling-agent", "ai", "core"]
+}

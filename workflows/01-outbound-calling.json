@@ -1,0 +1,249 @@
+{
+  "name": "01 — Outbound Calling",
+  "nodes": [
+    {
+      "id": "node-trigger",
+      "name": "Supabase: New Lead Trigger",
+      "type": "n8n-nodes-base.supabaseTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "parameters": {
+        "table": "leads",
+        "event": "INSERT",
+        "schema": "public"
+      }
+    },
+    {
+      "id": "node-set",
+      "name": "Set Lead Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [220, 0],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "name": "lead_id",     "value": "={{ $json.id }}",          "type": "string" },
+            { "name": "name",        "value": "={{ $json.name }}",        "type": "string" },
+            { "name": "phone",       "value": "={{ $json.phone }}",       "type": "string" },
+            { "name": "email",       "value": "={{ $json.email }}",       "type": "string" },
+            { "name": "company",     "value": "={{ $json.company }}",     "type": "string" },
+            { "name": "retry_count", "value": "={{ $json.retry_count ?? 0 }}", "type": "number" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-if-phone",
+      "name": "IF: Phone Exists",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.phone }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEmpty" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-if-retry",
+      "name": "IF: Under Retry Limit",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 0],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.retry_count }}",
+              "rightValue": 3,
+              "operator": { "type": "number", "operation": "lte" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-twilio-call",
+      "name": "Twilio: Initiate Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [880, 0],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Calls.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "To",                     "value": "={{ $json.phone }}" },
+            { "name": "From",                   "value": "={{ $env.TWILIO_PHONE_NUMBER }}" },
+            { "name": "Url",                    "value": "={{ $env.N8N_BASE_URL }}/webhook/ai-call-handler" },
+            { "name": "StatusCallback",         "value": "={{ $env.N8N_BASE_URL }}/webhook/call-status" },
+            { "name": "StatusCallbackMethod",   "value": "POST" },
+            { "name": "StatusCallbackEvent",    "value": "completed" },
+            { "name": "Record",                 "value": "true" },
+            { "name": "RecordingStatusCallback","value": "={{ $env.N8N_BASE_URL }}/webhook/recording-ready" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-log-initiated",
+      "name": "DB: Log Call Initiated",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1100, 0],
+      "parameters": {
+        "operation": "insert",
+        "table": "call_logs",
+        "fields": {
+          "values": {
+            "string": [
+              { "key": "lead_id",   "value": "={{ $('Set Lead Data').item.json.lead_id }}" },
+              { "key": "call_sid",  "value": "={{ $json.sid }}" },
+              { "key": "direction", "value": "outbound" },
+              { "key": "outcome",   "value": "initiated" },
+              { "key": "started_at","value": "={{ new Date().toISOString() }}" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "node-wait",
+      "name": "Wait: Call Status Callback",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1,
+      "position": [1320, 0],
+      "parameters": {
+        "resume": "webhook",
+        "webhookSuffix": "=call-status-{{ $('Set Lead Data').item.json.lead_id }}"
+      }
+    },
+    {
+      "id": "node-switch-status",
+      "name": "Switch: Call Status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1540, 0],
+      "parameters": {
+        "mode": "expression",
+        "output": "={{ $json.CallStatus }}",
+        "rules": {
+          "rules": [
+            { "value": "completed",  "outputKey": "answered"   },
+            { "value": "no-answer",  "outputKey": "no_answer"  },
+            { "value": "busy",       "outputKey": "no_answer"  },
+            { "value": "failed",     "outputKey": "failed"     }
+          ]
+        },
+        "fallbackOutput": "failed"
+      }
+    },
+    {
+      "id": "node-update-log",
+      "name": "DB: Finalize Call Log",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1760, 0],
+      "parameters": {
+        "operation": "update",
+        "table": "call_logs",
+        "filterType": "string",
+        "matchType": "equals",
+        "filters": {
+          "call_sid": "={{ $json.CallSid }}"
+        },
+        "fields": {
+          "values": {
+            "string": [
+              { "key": "outcome",      "value": "={{ $json.CallStatus }}" },
+              { "key": "ended_at",     "value": "={{ new Date().toISOString() }}" },
+              { "key": "duration_sec", "value": "={{ parseInt($json.CallDuration ?? 0) }}" },
+              { "key": "recording_url","value": "={{ $json.RecordingUrl ?? '' }}" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "node-execute-ai",
+      "name": "Execute: AI Conversation",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1980, -100],
+      "parameters": {
+        "workflowId": "03-ai-conversation",
+        "source": "database"
+      }
+    },
+    {
+      "id": "node-execute-retry",
+      "name": "Execute: Retry Logic",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1,
+      "position": [1980, 100],
+      "parameters": {
+        "workflowId": "util-retry-logic",
+        "source": "database",
+        "workflowInputs": {
+          "schema": [
+            { "key": "lead_id",     "type": "string" },
+            { "key": "retry_count", "type": "number" }
+          ],
+          "value": {
+            "lead_id":     "={{ $('Set Lead Data').item.json.lead_id }}",
+            "retry_count": "={{ $('Set Lead Data').item.json.retry_count }}"
+          }
+        }
+      }
+    },
+    {
+      "id": "node-mark-lost",
+      "name": "DB: Mark Lead Lost",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, 200],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $json.lead_id }}" },
+        "fields": {
+          "values": {
+            "string": [{ "key": "status", "value": "lost" }]
+          }
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Supabase: New Lead Trigger": { "main": [[{ "node": "Set Lead Data", "type": "main", "index": 0 }]] },
+    "Set Lead Data":              { "main": [[{ "node": "IF: Phone Exists", "type": "main", "index": 0 }]] },
+    "IF: Phone Exists":           { "main": [[{ "node": "IF: Under Retry Limit", "type": "main", "index": 0 }], []] },
+    "IF: Under Retry Limit":      { "main": [[{ "node": "Twilio: Initiate Call", "type": "main", "index": 0 }], [{ "node": "DB: Mark Lead Lost", "type": "main", "index": 0 }]] },
+    "Twilio: Initiate Call":      { "main": [[{ "node": "DB: Log Call Initiated", "type": "main", "index": 0 }]] },
+    "DB: Log Call Initiated":     { "main": [[{ "node": "Wait: Call Status Callback", "type": "main", "index": 0 }]] },
+    "Wait: Call Status Callback": { "main": [[{ "node": "Switch: Call Status", "type": "main", "index": 0 }]] },
+    "Switch: Call Status":        {
+      "main": [
+        [{ "node": "DB: Finalize Call Log", "type": "main", "index": 0 }, { "node": "Execute: AI Conversation", "type": "main", "index": 0 }],
+        [{ "node": "DB: Finalize Call Log", "type": "main", "index": 0 }, { "node": "Execute: Retry Logic", "type": "main", "index": 0 }],
+        [{ "node": "DB: Finalize Call Log", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": { "errorWorkflow": "util-escalation" },
+  "tags": ["calling-agent", "outbound"]
+}

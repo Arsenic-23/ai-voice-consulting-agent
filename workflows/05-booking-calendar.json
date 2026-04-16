@@ -1,0 +1,215 @@
+{
+  "name": "05 — Booking & Calendar",
+  "nodes": [
+    {
+      "id": "node-trigger",
+      "name": "Webhook: Booking Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "trigger-booking",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "trigger-booking",
+        "responseMode": "lastNode"
+      }
+    },
+    {
+      "id": "node-load-lead",
+      "name": "DB: Load Lead",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "parameters": {
+        "operation": "get",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $json.lead_id }}" }
+      }
+    },
+    {
+      "id": "node-compute-time",
+      "name": "Compute Time Windows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const preferredTime = $('Webhook: Booking Trigger').item.json.preferred_time\n  ? new Date($('Webhook: Booking Trigger').item.json.preferred_time)\n  : (() => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(10, 0, 0, 0); return d; })();\n\nconst timeMin = new Date(preferredTime);\nconst timeMax = new Date(preferredTime.getTime() + 60 * 60 * 1000);\n\nreturn [{ json: { timeMin: timeMin.toISOString(), timeMax: timeMax.toISOString(), preferredTime: preferredTime.toISOString() } }];"
+      }
+    },
+    {
+      "id": "node-check-calendar",
+      "name": "Google Calendar: Check Availability",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1,
+      "position": [660, 0],
+      "parameters": {
+        "resource": "event",
+        "operation": "getAll",
+        "calendar": "={{ $env.GOOGLE_CALENDAR_ID }}",
+        "returnAll": false,
+        "limit": 10,
+        "options": {
+          "timeMin": "={{ $json.timeMin }}",
+          "timeMax": "={{ $json.timeMax }}"
+        }
+      }
+    },
+    {
+      "id": "node-if-available",
+      "name": "IF: Slot Available",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 0],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "equal" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-create-event",
+      "name": "Google Calendar: Create Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1,
+      "position": [1100, -100],
+      "parameters": {
+        "resource": "event",
+        "operation": "create",
+        "calendar": "={{ $env.GOOGLE_CALENDAR_ID }}",
+        "start": "={{ $('Compute Time Windows').item.json.preferredTime }}",
+        "end": "={{ new Date(new Date($('Compute Time Windows').item.json.preferredTime).getTime() + 30*60*1000).toISOString() }}",
+        "additionalFields": {
+          "summary": "=Free Strategy Call — {{ $('DB: Load Lead').item.json.name }} ({{ $('DB: Load Lead').item.json.company || 'N/A' }})",
+          "description": "=Lead Score: {{ $('DB: Load Lead').item.json.score }}/100\nBudget: {{ $('DB: Load Lead').item.json.budget }}\nProblem: {{ $('DB: Load Lead').item.json.problem }}\nBooked via AI Calling Agent",
+          "attendees": "=[{\"email\": \"{{ $('DB: Load Lead').item.json.email }}\"}]",
+          "conferenceDataVersion": 1,
+          "sendUpdates": "all"
+        }
+      }
+    },
+    {
+      "id": "node-sms-confirm",
+      "name": "Twilio: SMS Confirmation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1320, -200],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "To",   "value": "={{ $('DB: Load Lead').item.json.phone }}" },
+            { "name": "From", "value": "={{ $env.TWILIO_PHONE_NUMBER }}" },
+            { "name": "Body", "value": "=✅ Confirmed! Your strategy call is booked. Meeting link coming by email shortly. Reply CANCEL to cancel." }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-email-confirm",
+      "name": "Gmail: Booking Confirmation",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [1320, 0],
+      "parameters": {
+        "operation": "send",
+        "subject": "=✅ Strategy Call Confirmed — {{ $('DB: Load Lead').item.json.name }}",
+        "emailType": "html",
+        "message": "=<html><body style=\"font-family:Arial,sans-serif;max-width:600px\"><div style=\"background:linear-gradient(135deg,#667eea,#764ba2);padding:30px;border-radius:12px 12px 0 0;text-align:center\"><h1 style=\"color:white;margin:0\">✅ Strategy Call Confirmed!</h1></div><div style=\"background:#fff;padding:30px;border:1px solid #e5e7eb;border-radius:0 0 12px 12px\"><p>Hi {{ $('DB: Load Lead').item.json.name }},</p><p>Your free 30-minute strategy call has been confirmed!</p><div style=\"background:#f0f7ff;border-left:4px solid #4F46E5;padding:15px;margin:20px 0;border-radius:4px\"><strong>📅 Duration:</strong> 30 minutes<br><strong>📍 Format:</strong> Google Meet<br><strong>🔗 Link:</strong> <a href='{{ $('Google Calendar: Create Event').item.json.hangoutLink }}'>Join Meeting</a></div><h3>What to Prepare:</h3><ul><li>Your biggest business challenge</li><li>Growth goals for the next 6–12 months</li><li>Any specific questions for our team</li></ul><p><strong>The Consulting Team</strong></p></div></body></html>",
+        "toList": "={{ $('DB: Load Lead').item.json.email }}"
+      }
+    },
+    {
+      "id": "node-create-appointment",
+      "name": "DB: Create Appointment",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1540, 0],
+      "parameters": {
+        "operation": "insert",
+        "table": "appointments",
+        "fields": {
+          "values": {
+            "string": [
+              { "key": "lead_id",         "value": "={{ $('DB: Load Lead').item.json.id }}" },
+              { "key": "scheduled_at",    "value": "={{ $('Compute Time Windows').item.json.preferredTime }}" },
+              { "key": "status",          "value": "confirmed" },
+              { "key": "meeting_link",    "value": "={{ $('Google Calendar: Create Event').item.json.hangoutLink ?? '' }}" },
+              { "key": "google_event_id", "value": "={{ $('Google Calendar: Create Event').item.json.id }}" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "node-mark-booked",
+      "name": "DB: Mark Lead Booked",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1760, 0],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $('DB: Load Lead').item.json.id }}" },
+        "fields": { "values": { "string": [{ "key": "status", "value": "booked" }] } }
+      }
+    },
+    {
+      "id": "node-alternate-slots",
+      "name": "Find Alternate Slots",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 100],
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const baseTime = new Date($('Compute Time Windows').item.json.preferredTime);\nconst slots = [\n  new Date(baseTime.getTime() + 1 * 60 * 60 * 1000),\n  new Date(baseTime.getTime() + 3 * 60 * 60 * 1000),\n  new Date(baseTime.getTime() + 24 * 60 * 60 * 1000)\n].map(d => ({ iso: d.toISOString(), display: d.toLocaleString('en-US', { weekday:'long', month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' }) }));\nreturn [{ json: { alternate_slots: slots, lead_id: $('Webhook: Booking Trigger').item.json.lead_id } }];"
+      }
+    },
+    {
+      "id": "node-send-alternatives",
+      "name": "HTTP: Send Alternatives to AI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1320, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.AI_SERVER_URL }}/alternate-slots",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook: Booking Trigger":          { "main": [[{ "node": "DB: Load Lead", "type": "main", "index": 0 }]] },
+    "DB: Load Lead":                     { "main": [[{ "node": "Compute Time Windows", "type": "main", "index": 0 }]] },
+    "Compute Time Windows":              { "main": [[{ "node": "Google Calendar: Check Availability", "type": "main", "index": 0 }]] },
+    "Google Calendar: Check Availability":{ "main": [[{ "node": "IF: Slot Available", "type": "main", "index": 0 }]] },
+    "IF: Slot Available":                {
+      "main": [
+        [{ "node": "Google Calendar: Create Event", "type": "main", "index": 0 }],
+        [{ "node": "Find Alternate Slots",          "type": "main", "index": 0 }]
+      ]
+    },
+    "Google Calendar: Create Event":     { "main": [[{ "node": "Twilio: SMS Confirmation", "type": "main", "index": 0 }, { "node": "Gmail: Booking Confirmation", "type": "main", "index": 0 }]] },
+    "Gmail: Booking Confirmation":       { "main": [[{ "node": "DB: Create Appointment", "type": "main", "index": 0 }]] },
+    "DB: Create Appointment":            { "main": [[{ "node": "DB: Mark Lead Booked", "type": "main", "index": 0 }]] },
+    "Find Alternate Slots":              { "main": [[{ "node": "HTTP: Send Alternatives to AI", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "errorWorkflow": "util-escalation" },
+  "tags": ["calling-agent", "booking"]
+}

@@ -1,0 +1,175 @@
+{
+  "name": "02 — Inbound Call Handling",
+  "nodes": [
+    {
+      "id": "node-webhook-inbound",
+      "name": "Webhook: Incoming Call",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "incoming-call",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "incoming-call",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "node-extract-caller",
+      "name": "Extract Caller Info",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [220, 0],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "name": "call_sid",      "value": "={{ $json.body.CallSid }}", "type": "string" },
+            { "name": "caller_phone",  "value": "={{ $json.body.From }}",    "type": "string" },
+            { "name": "called_number", "value": "={{ $json.body.To }}",      "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-lookup-lead",
+      "name": "DB: Lookup Lead by Phone",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [440, 0],
+      "parameters": {
+        "operation": "getMany",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "phone": "={{ $json.caller_phone }}" },
+        "limit": 1
+      }
+    },
+    {
+      "id": "node-if-known",
+      "name": "IF: Known Caller",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 0],
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 1,
+              "operator": { "type": "number", "operation": "gte" }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-known-context",
+      "name": "Set: Known Lead Context",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3,
+      "position": [880, -100],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            { "name": "lead_id",   "value": "={{ $json[0].id }}",      "type": "string" },
+            { "name": "lead_name", "value": "={{ $json[0].name }}",    "type": "string" },
+            { "name": "is_known",  "value": true,                      "type": "boolean" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-create-lead",
+      "name": "DB: Create New Lead",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, 100],
+      "parameters": {
+        "operation": "insert",
+        "table": "leads",
+        "fields": {
+          "values": {
+            "string": [
+              { "key": "phone",  "value": "={{ $('Extract Caller Info').item.json.caller_phone }}" },
+              { "key": "source", "value": "inbound-call" },
+              { "key": "status", "value": "new" }
+            ]
+          }
+        },
+        "returnFields": "*"
+      }
+    },
+    {
+      "id": "node-merge",
+      "name": "Merge: Lead Data",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1100, 0],
+      "parameters": {
+        "mode": "passThrough",
+        "output": "first"
+      }
+    },
+    {
+      "id": "node-twiml",
+      "name": "Respond: TwiML Stream",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1320, 0],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response>\n  <Say voice=\"Polly.Joanna\">Please hold for just a moment while I connect you.</Say>\n  <Connect>\n    <Stream url=\"{{ $env.AI_SERVER_WS_URL }}/stream?lead_id={{ $json.lead_id }}&amp;call_sid={{ $('Extract Caller Info').item.json.call_sid }}&amp;direction=inbound\" />\n  </Connect>\n</Response>",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Content-Type", "value": "application/xml" }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "node-create-call-log",
+      "name": "DB: Create Call Log",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [1540, 0],
+      "parameters": {
+        "operation": "insert",
+        "table": "call_logs",
+        "fields": {
+          "values": {
+            "string": [
+              { "key": "lead_id",   "value": "={{ $json.lead_id }}" },
+              { "key": "call_sid",  "value": "={{ $('Extract Caller Info').item.json.call_sid }}" },
+              { "key": "direction", "value": "inbound" },
+              { "key": "started_at","value": "={{ new Date().toISOString() }}" },
+              { "key": "outcome",   "value": "answered" }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook: Incoming Call":   { "main": [[{ "node": "Extract Caller Info", "type": "main", "index": 0 }]] },
+    "Extract Caller Info":      { "main": [[{ "node": "DB: Lookup Lead by Phone", "type": "main", "index": 0 }]] },
+    "DB: Lookup Lead by Phone": { "main": [[{ "node": "IF: Known Caller", "type": "main", "index": 0 }]] },
+    "IF: Known Caller":         {
+      "main": [
+        [{ "node": "Set: Known Lead Context", "type": "main", "index": 0 }],
+        [{ "node": "DB: Create New Lead",     "type": "main", "index": 0 }]
+      ]
+    },
+    "Set: Known Lead Context":  { "main": [[{ "node": "Merge: Lead Data", "type": "main", "index": 0 }]] },
+    "DB: Create New Lead":      { "main": [[{ "node": "Merge: Lead Data", "type": "main", "index": 1 }]] },
+    "Merge: Lead Data":         { "main": [[{ "node": "Respond: TwiML Stream", "type": "main", "index": 0 }]] },
+    "Respond: TwiML Stream":    { "main": [[{ "node": "DB: Create Call Log", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": { "errorWorkflow": "util-escalation" },
+  "tags": ["calling-agent", "inbound"]
+}
