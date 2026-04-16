@@ -1,0 +1,122 @@
+{
+  "name": "UTIL — Escalation",
+  "nodes": [
+    {
+      "id": "node-trigger",
+      "name": "Execute Workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "parameters": {}
+    },
+    {
+      "id": "node-load-lead",
+      "name": "DB: Load Lead",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [220, 0],
+      "parameters": {
+        "operation": "get",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $json.lead_id }}" }
+      }
+    },
+    {
+      "id": "node-slack",
+      "name": "Slack: Escalation Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2,
+      "position": [440, -100],
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channel": "#sales-alerts",
+        "text": "=🔥 *HOT LEAD ESCALATION* 🔥\n\n*Name:* {{ $json.name }}\n*Company:* {{ $json.company }}\n*Phone:* {{ $json.phone }}\n*Email:* {{ $json.email }}\n*Score:* {{ $json.score }}/100\n*Status:* {{ $json.status }}\n*Budget:* {{ $json.budget || 'Unknown' }}\n*Urgency:* {{ $json.urgency }}\n*Problem:* {{ $json.problem }}\n\n👆 *Action Required:* Call this lead NOW",
+        "otherOptions": { "mrkdwn": true }
+      }
+    },
+    {
+      "id": "node-email-consultant",
+      "name": "Gmail: Notify Consultant",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2,
+      "position": [440, 0],
+      "parameters": {
+        "operation": "send",
+        "subject": "=🔥 HOT LEAD: {{ $json.name }} (Score: {{ $json.score }}/100)",
+        "emailType": "html",
+        "message": "=<html><body style=\"font-family:Arial,sans-serif\"><div style=\"background:#ef4444;color:white;padding:15px;border-radius:8px\"><h2>🔥 Hot Lead Escalation — Action Required</h2></div><div style=\"padding:20px\"><table style=\"width:100%;border-collapse:collapse\"><tr><td style=\"padding:8px;border:1px solid #e5e7eb\"><strong>Name</strong></td><td style=\"padding:8px;border:1px solid #e5e7eb\">{{ $json.name }}</td></tr><tr><td style=\"padding:8px;border:1px solid #e5e7eb\"><strong>Company</strong></td><td style=\"padding:8px;border:1px solid #e5e7eb\">{{ $json.company }}</td></tr><tr><td style=\"padding:8px;border:1px solid #e5e7eb\"><strong>Phone</strong></td><td style=\"padding:8px;border:1px solid #e5e7eb\">{{ $json.phone }}</td></tr><tr><td style=\"padding:8px;border:1px solid #e5e7eb\"><strong>Score</strong></td><td style=\"padding:8px;border:1px solid #e5e7eb\">{{ $json.score }}/100</td></tr><tr><td style=\"padding:8px;border:1px solid #e5e7eb\"><strong>Budget</strong></td><td style=\"padding:8px;border:1px solid #e5e7eb\">{{ $json.budget }}</td></tr><tr><td style=\"padding:8px;border:1px solid #e5e7eb\"><strong>Urgency</strong></td><td style=\"padding:8px;border:1px solid #e5e7eb\">{{ $json.urgency }}</td></tr><tr><td style=\"padding:8px;border:1px solid #e5e7eb\"><strong>Problem</strong></td><td style=\"padding:8px;border:1px solid #e5e7eb\">{{ $json.problem }}</td></tr></table><p><strong>Call this lead immediately.</strong> Escalated from AI calling agent.</p></div></body></html>",
+        "toList": "={{ $env.SENIOR_CONSULTANT_EMAIL }}"
+      }
+    },
+    {
+      "id": "node-transfer-call",
+      "name": "Twilio: Transfer Live Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [440, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Calls/{{ $('Execute Workflow Trigger').item.json.call_sid }}.json",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "Twiml",
+              "value": "=<Response><Say voice=\"Polly.Joanna\">Excellent! Let me transfer you to one of our senior consultants right away. Please hold for just a moment.</Say><Dial timeout=\"30\"><Number>{{ $env.ESCALATION_PHONE }}</Number></Dial></Response>"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "node-update-status",
+      "name": "DB: Mark Escalated",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [660, 0],
+      "parameters": {
+        "operation": "update",
+        "table": "leads",
+        "filterType": "string",
+        "filters": { "id": "={{ $('DB: Load Lead').item.json.id }}" },
+        "fields": { "values": { "string": [{ "key": "status", "value": "escalated" }] } }
+      }
+    },
+    {
+      "id": "node-log-escalation",
+      "name": "DB: Log Escalation",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [880, 0],
+      "parameters": {
+        "operation": "update",
+        "table": "call_logs",
+        "filterType": "string",
+        "filters": { "call_sid": "={{ $('Execute Workflow Trigger').item.json.call_sid }}" },
+        "fields": { "values": { "string": [{ "key": "outcome", "value": "escalated" }] } }
+      }
+    }
+  ],
+  "connections": {
+    "Execute Workflow Trigger": { "main": [[{ "node": "DB: Load Lead", "type": "main", "index": 0 }]] },
+    "DB: Load Lead":            {
+      "main": [[
+        { "node": "Slack: Escalation Alert",    "type": "main", "index": 0 },
+        { "node": "Gmail: Notify Consultant",   "type": "main", "index": 0 },
+        { "node": "Twilio: Transfer Live Call", "type": "main", "index": 0 }
+      ]]
+    },
+    "Slack: Escalation Alert":    { "main": [[{ "node": "DB: Mark Escalated", "type": "main", "index": 0 }]] },
+    "Gmail: Notify Consultant":   { "main": [[{ "node": "DB: Mark Escalated", "type": "main", "index": 0 }]] },
+    "Twilio: Transfer Live Call": { "main": [[{ "node": "DB: Mark Escalated", "type": "main", "index": 0 }]] },
+    "DB: Mark Escalated":         { "main": [[{ "node": "DB: Log Escalation", "type": "main", "index": 0 }]] }
+  },
+  "active": false,
+  "settings": {},
+  "tags": ["calling-agent", "utility", "escalation"]
+}
